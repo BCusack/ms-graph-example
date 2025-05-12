@@ -5,6 +5,9 @@ import aiofiles  # Added for async file operations
 
 from azure.identity.aio import ClientSecretCredential
 from msgraph import GraphServiceClient
+from msgraph.generated.service_principals.service_principals_request_builder import (
+    ServicePrincipalsRequestBuilder,
+)  # Added for service principal
 
 # Set your Azure AD app details (or use environment variables)
 TENANT_ID = os.getenv("TENANT_ID")
@@ -112,9 +115,24 @@ async def get_me(client: GraphServiceClient):
     Fetches the current user's details.
     """
     try:
-        me = await client.me.get()
+        me = await client.me.profile.get()
         if me:
             print(f"User ID: {me.id}, Display Name: {me.display_name}")
+        else:
+            print("No user information found.")
+    except Exception as e:
+        print(f"An error occurred while fetching user details: {e}")
+
+
+async def get_all_users(client: GraphServiceClient):
+    """
+    Fetches
+    """
+    try:
+        users = await client.users.get()
+        if users and users.value:
+            for user in users.value:
+                print(f"User ID: {user.id}, Display Name: {user.display_name}")
         else:
             print("No user information found.")
     except Exception as e:
@@ -133,50 +151,50 @@ async def main():
     ]  # Ensure Sites.Read.All is granted in Azure AD
     client = GraphServiceClient(credentials=credential, scopes=scopes)
 
+    await get_all_users(client)
+
     if not CLIENT_ID or not TENANT_ID or not CLIENT_SECRET:
         print(
-            "Error: TENANT_ID, CLIENT_ID, or CLIENT_SECRET is not set. "
-            "Please set these environment variables."
+            "Error: TENANT_ID, CLIENT_ID, or CLIENT_SECRET is not set or is invalid. "
+            "Please check your .env file and ensure they are correct full values."
         )
         return
 
-    # --- New SharePoint Download Example ---
-    example_sharepoint_url = os.getenv("SAMPLE")  # Replace this
-    example_output_pdf_path = "downloaded_document.pdf"
+    try:
+        print(
+            f"Attempting to fetch service principal for application (Client ID: {CLIENT_ID})..."
+        )
+        # For app-only authentication, get the service principal associated with the application
+        query_params = ServicePrincipalsRequestBuilder.ServicePrincipalsRequestBuilderGetQueryParameters(
+            filter=f"appId eq '{CLIENT_ID}'"
+        )
+        request_configuration = ServicePrincipalsRequestBuilder.ServicePrincipalsRequestBuilderGetRequestConfiguration(
+            query_parameters=query_params
+        )
 
-    print("\n--- Running SharePoint Download Example ---")
-    await download_sharepoint_url_as_pdf(
-        client, example_sharepoint_url, example_output_pdf_path
-    )
-    print("-------------------------------------\n")
+        service_principal_response = await client.service_principals.get(
+            request_configuration=request_configuration
+        )
 
-    # --- Existing User Listing Logic (Commented out for this example) ---
-    # try:
-    #     print("Fetching all users...")
-    #     users_response = await client.users.get()
+        if service_principal_response and service_principal_response.value:
+            app_service_principal = service_principal_response.value[0]
+            print(
+                f"Successfully authenticated. Application Display Name: {app_service_principal.display_name} (ID: {app_service_principal.id})"
+            )
+        elif service_principal_response:
+            print(
+                f"Could not find service principal for app ID: {CLIENT_ID}. Response: {service_principal_response}"
+            )
+        else:
+            print(
+                f"Failed to retrieve service principal for app ID: {CLIENT_ID}. No response."
+            )
 
-    #     if users_response and users_response.value:
-    #         all_users = users_response.value
-    #         next_link = users_response.odata_next_link
-    #         # Basic pagination handling (prints first page, notes if more exist)
-    #         if next_link:
-    #             print(
-    #                 f"Found {len(users_response.value)} users on this page. More users might exist (odata_next_link present)."
-    #             )
-    #             print(
-    #                 "To fetch all users across pages, full pagination handling is required."
-    #             )
+    except Exception as e:
+        import traceback
 
-    #         print(f"\nFound {len(all_users)} user(s) on the first page:")
-    #         for user in all_users:
-    #             print(
-    #                 f"  Display Name: {user.display_name}, UserPrincipalName: {user.user_principal_name}, ID: {user.id}"
-    #             )
-    #     else:
-    #         print("No users found or an error occurred while fetching users.")
-
-    # except Exception as e:
-    #     print(f"An error occurred while fetching users: {e}")
+        print(f"An error occurred: {e}")
+        print(traceback.format_exc())
 
 
 if __name__ == "__main__":
