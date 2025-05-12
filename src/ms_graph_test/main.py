@@ -141,7 +141,7 @@ async def main():
         return
 
     # --- New SharePoint Download Example ---
-    example_sharepoint_url = "https://1drv.ms/b/c/15b85433fda478fe/EcBJk4nBPZZNiVIxKBCNeRYBAU53LoOdHCgLPESiQ0yn3A?e=NeR4pI"  # Replace this
+    example_sharepoint_url = os.getenv("SAMPLE")  # Replace this
     example_output_pdf_path = "downloaded_document.pdf"
 
     print("\n--- Running SharePoint Download Example ---")
