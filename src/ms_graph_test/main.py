@@ -2,12 +2,13 @@ import asyncio
 import os
 import base64  # Added for sharing token
 import aiofiles  # Added for async file operations
-
 from azure.identity.aio import ClientSecretCredential
-from msgraph import GraphServiceClient
+from msgraph.graph_service_client import GraphServiceClient
+from kiota_abstractions.api_error import APIError  # General Kiota API error
 from msgraph.generated.service_principals.service_principals_request_builder import (
     ServicePrincipalsRequestBuilder,
-)  # Added for service principal
+)
+import aiohttp  # For making the actual upload PUT request
 
 # Set your Azure AD app details (or use environment variables)
 TENANT_ID = os.getenv("TENANT_ID")
@@ -115,7 +116,7 @@ async def get_me(client: GraphServiceClient):
     Fetches the current user's details.
     """
     try:
-        me = await client.me.profile.get()
+        me = await client.me.get()
         if me:
             print(f"User ID: {me.id}, Display Name: {me.display_name}")
         else:
@@ -140,6 +141,14 @@ async def get_all_users(client: GraphServiceClient):
 
 
 async def main():
+    # Ensure required environment variables are set
+    if not TENANT_ID or not CLIENT_ID or not CLIENT_SECRET:
+        print(
+            "Error: TENANT_ID, CLIENT_ID, or CLIENT_SECRET is not set or is invalid. "
+            "Please check your .env file and ensure they are correct full values."
+        )
+        return
+
     # Authenticate with client credentials
     credential = ClientSecretCredential(
         tenant_id=TENANT_ID,
@@ -152,13 +161,6 @@ async def main():
     client = GraphServiceClient(credentials=credential, scopes=scopes)
 
     await get_all_users(client)
-
-    if not CLIENT_ID or not TENANT_ID or not CLIENT_SECRET:
-        print(
-            "Error: TENANT_ID, CLIENT_ID, or CLIENT_SECRET is not set or is invalid. "
-            "Please check your .env file and ensure they are correct full values."
-        )
-        return
 
     try:
         print(
@@ -195,6 +197,121 @@ async def main():
 
         print(f"An error occurred: {e}")
         print(traceback.format_exc())
+
+
+async def upload_file_to_sharepoint(
+    client: GraphServiceClient,
+    file_path: str,
+    sharepoint_site_id: str,
+    drive_name: str,
+    folder_path: str = "",
+):
+    if not file_path or not os.path.isfile(file_path):
+        print(f"Error: File '{file_path}' does not exist.")
+        return
+
+    # Get the drive (document library) ID
+    try:
+        drives = await client.sites.by_site_id(sharepoint_site_id).drives.get()
+    except APIError as e:
+        print(
+            f"Graph API Error getting drives: Status {e.response_status_code}, {str(e)}"
+        )
+        return
+    except Exception as e:
+        print(f"Generic error getting drives: {e}")
+        return
+
+    drive_id = None
+    drives_value = getattr(drives, "value", None)
+    if drives and drives_value is not None:
+        for drive in drives_value:
+            if drive.name == drive_name:
+                drive_id = drive.id
+                break
+    else:
+        print(
+            f"Could not retrieve drives for site '{sharepoint_site_id}'. Response: {drives}"
+        )
+        return
+    if not drive_id:
+        print(f"Drive '{drive_name}' not found.")
+        return
+
+    file_name = os.path.basename(file_path)
+
+    clean_folder_path = folder_path.strip("/\\\\").replace("\\\\", "/")
+    if clean_folder_path:
+        upload_path_relative_to_root = f"{clean_folder_path}/{file_name}"
+    else:
+        upload_path_relative_to_root = file_name
+
+    # Simplified request body
+    request_body_dict = {"item": {"@microsoft.graph.conflictBehavior": "replace"}}
+
+    # The item specifier for the API call, e.g., "root:/MyFolder/MyFile.txt"
+    item_specifier = f"root:/{upload_path_relative_to_root.lstrip('/')}"
+
+    print(
+        f"Creating upload session for item specifier: {item_specifier} in drive {drive_id}"
+    )
+
+    try:
+        upload_session_request_builder = (
+            client.drives.by_drive_id(drive_id)
+            .items.by_drive_item_id(item_specifier)
+            .create_upload_session
+        )
+        upload_session = await upload_session_request_builder.post(
+            request_body=request_body_dict
+        )
+
+        await (
+            client.sites.by_site_id(site_id)
+            .drive.root.item_with_path("Documents/MyFile.txt")
+            .content.put(body=file_content)
+        )
+
+    except APIError as e:
+        print(
+            f"Graph API Error creating upload session: Status {e.response_status_code}"
+        )
+        print(f"Error details: {str(e)}")
+        if hasattr(e, "error") and e.error and hasattr(e.error, "message"):
+            print(f"Detailed message: {e.error.message}")
+        return
+    except Exception as e:
+        print(f"Generic error creating upload session: {type(e).__name__} - {e}")
+        return
+
+    if not upload_session or not upload_session.upload_url:
+        print("Failed to create upload session or upload URL not found.")
+        return
+
+    upload_url = upload_session.upload_url
+
+    file_size = os.path.getsize(file_path)
+    print(f"File size: {file_size} bytes. Uploading to: {upload_url}")
+
+    async with aiohttp.ClientSession() as http_session:
+        async with aiofiles.open(file_path, "rb") as f:
+            content = await f.read()
+            headers = {
+                "Content-Length": str(file_size),
+            }
+            async with http_session.put(
+                upload_url, data=content, headers=headers
+            ) as response:
+                if response.status >= 200 and response.status < 300:
+                    print(f"File uploaded successfully. Status: {response.status}")
+                    response_json = await response.json()
+                    print(f"Server response: {response_json}")
+                    return response_json
+                else:
+                    print(f"Upload failed. Status: {response.status}")
+                    error_text = await response.text()
+                    print(f"Error details: {error_text}")
+                    return None
 
 
 if __name__ == "__main__":
